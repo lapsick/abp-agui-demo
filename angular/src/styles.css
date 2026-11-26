@@ -1,0 +1,122 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f4f6fa;
+  color: #17243b;
+  font: 15px system-ui, sans-serif;
+}
+
+header {
+  padding: 24px 5vw;
+  background: #14243d;
+  color: white;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 12px;
+}
+
+header p {
+  margin: 0;
+  color: #b9c9e3;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 20px;
+  padding: 24px 5vw;
+}
+
+section,
+aside {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #dce3ec;
+  border-radius: 12px;
+  background: white;
+}
+
+.messages {
+  min-height: 260px;
+  max-height: 65vh;
+  overflow: auto;
+}
+
+article {
+  margin: 12px 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f0f4fa;
+}
+
+small {
+  color: #536783;
+  text-transform: uppercase;
+}
+
+form {
+  display: flex;
+  gap: 8px;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #bac8da;
+  border-radius: 6px;
+}
+
+button {
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #2457a7;
+  color: white;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+td,
+th {
+  padding: 8px;
+  border-bottom: 1px solid #dce3ec;
+  text-align: left;
+}
+
+details {
+  padding: 8px;
+  border-bottom: 1px solid #e3e8ef;
+}
+
+pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
+aside {
+  max-height: 80vh;
+  overflow: auto;
+}
+
+@media (max-width: 800px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+}

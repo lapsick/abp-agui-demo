@@ -1,0 +1,11 @@
+{
+    "configurations": [
+    {
+        "name": "ReSharper: Launch .NET Project",
+        "type": "dotnet",
+        "request": "launch",
+        "projectPath": "${workspaceFolder}/Demo.csproj",
+        "launchConfigurationId": "TargetFramework=net10.0;Demo"
+    }
+    ]
+}
