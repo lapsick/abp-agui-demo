@@ -1,20 +1,20 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["proposal", "design", "tasks", "specs"],
+  "required": ["goal", "work", "scenarios"],
   "properties": {
-    "proposal": { "type": "string" },
-    "design": { "type": "string" },
-    "tasks": { "type": "string" },
-    "specs": {
+    "goal": { "type": "string" },
+    "work": { "type": "string" },
+    "scenarios": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["capability", "markdown"],
+        "required": ["name", "when", "then"],
         "properties": {
-          "capability": { "type": "string" },
-          "markdown": { "type": "string" }
+          "name": { "type": "string" },
+          "when": { "type": "string" },
+          "then": { "type": "string" }
         }
       }
     }

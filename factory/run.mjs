@@ -8,9 +8,6 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const openSpecCli = fileURLToPath(new URL(
-  '../.factory/tools/node_modules/@fission-ai/openspec/bin/openspec.js', import.meta.url,
-));
 const verdictSchema = fileURLToPath(new URL('./verdict.schema.json', import.meta.url));
 const planSchema = fileURLToPath(new URL('./plan.schema.json', import.meta.url));
 const implementationSchema = fileURLToPath(new URL('./implementation.schema.json', import.meta.url));
@@ -20,7 +17,6 @@ const entries = (output) => output.split('\0').filter(Boolean);
 function command(cwd, executable, args, { input, log, timeout = 120_000 } = {}) {
   const result = spawnSync(executable, args, {
     cwd, input, timeout, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, OPENSPEC_TELEMETRY: '0', OPENSPEC_NO_UPDATE_CHECK: '1' },
     windowsHide: true,
   });
   if (log) {
@@ -37,7 +33,7 @@ function command(cwd, executable, args, { input, log, timeout = 120_000 } = {}) 
 const git = (cwd, ...args) => command(cwd, 'git', args);
 const revision = (cwd) => git(cwd, 'rev-parse', 'HEAD').trim();
 const dirty = (cwd) => git(cwd, 'status', '--porcelain', '--untracked-files=all').trim();
-const openSpec = (cwd, ...args) => command(cwd, process.execPath, [openSpecCli, ...args]);
+const specification = (state) => state.specPath ?? `openspec/changes/${state.change}`;
 
 function worktree(root, path, commit) {
   git(root, 'worktree', 'add', '--detach', path, commit);
@@ -49,62 +45,84 @@ function saveState(runPath, state) {
   renameSync(path + '.tmp', path);
 }
 
-function invokeCodex({ cwd, prompt, log, output, schema, sandbox = 'workspace-write' }) {
-  const args = ['-a', 'never', 'exec', '--disable', 'apps', '--sandbox', sandbox, '--ephemeral', '--json'];
+function invokeCodex({ cwd, prompt, log, output, schema, windowsSandbox, sandbox = 'workspace-write' }) {
+  const config = windowsSandbox ? ['-c', `windows.sandbox=${windowsSandbox}`] : [];
+  const args = [...config, '-a', 'never', 'exec', '--disable', 'apps', '--sandbox', sandbox, '--ephemeral', '--json'];
   if (output) args.push('--output-schema', schema, '--output-last-message', output);
   command(cwd, 'codex', [...args, '-'], { input: prompt, log, timeout: 20 * 60_000 });
 }
 
-function writeDraft(draft, change, output) {
-  const plan = JSON.parse(readFileSync(output, 'utf8'));
-  const folder = join(draft, 'openspec', 'changes', change);
-  const documents = ['proposal', 'design', 'tasks'];
-  const capabilityNames = new Set();
-  if (documents.some((name) => typeof plan[name] !== 'string' || !plan[name].trim()) ||
-      !Array.isArray(plan.specs) || !plan.specs.length) {
-    throw new Error('The planner must return the proposal, design, tasks, and at least one specification.');
+function writeDraft(draft, state, output) {
+  const { goal, work, scenarios } = JSON.parse(readFileSync(output, 'utf8'));
+  if (![goal, work].every((value) => typeof value === 'string' && value.trim()) ||
+      !Array.isArray(scenarios) || !scenarios.length || scenarios.some((scenario) =>
+        ![scenario?.name, scenario?.when, scenario?.then].every((value) =>
+          typeof value === 'string' && value.trim() && !/[\r\n]/.test(value),
+        ),
+      )) {
+    throw new Error('The planner must provide a goal, planned work, and named scenarios with conditions and expected results.');
   }
-  for (const spec of plan.specs) {
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(spec.capability) || capabilityNames.has(spec.capability) ||
-        typeof spec.markdown !== 'string' || !spec.markdown.trim()) {
-      throw new Error('Each planned specification needs a unique kebab-case capability and Markdown content.');
-    }
-    capabilityNames.add(spec.capability);
-  }
-  for (const name of documents) writeFileSync(join(folder, name + '.md'), plan[name].trim() + '\n');
-  for (const spec of plan.specs) {
-    const path = join(folder, 'specs', spec.capability);
-    mkdirSync(path, { recursive: true });
-    writeFileSync(join(path, 'spec.md'), spec.markdown.trim() + '\n');
-  }
+  const acceptance = scenarios.map(({ name, when, then }) =>
+    `### Scenario: ${name.trim()}\n\n- When: ${when.trim()}\n- Then: ${then.trim()}`,
+  ).join('\n\n');
+  mkdirSync(join(draft, 'specs'), { recursive: true });
+  writeFileSync(join(draft, state.specPath),
+    `# ${state.change}\n\n## Goal\n\n${goal.trim()}\n\n## Planned work\n\n${work.trim()}\n\n## Acceptance scenarios\n\n${acceptance}\n`);
 }
 
-function scenarioNames(cwd, changePath) {
-  const files = entries(git(cwd, 'ls-files', '-z', '--', `${changePath}/specs/`));
-  const names = files.filter((file) => file.endsWith('/spec.md')).flatMap((file) =>
-    Array.from(readFileSync(join(cwd, file), 'utf8').matchAll(/^#### Scenario:\s*([^\r\n]+)$/gm),
-      (match) => match[1].trim()).filter(Boolean),
-  );
-  if (!names.length || new Set(names).size !== names.length) {
-    throw new Error('The approved change must have at least one scenario and each scenario needs a unique name.');
+function scenarioNames(draft, state) {
+  let names;
+  if (state.specPath) {
+    const markdown = git(draft, 'show', `:${state.specPath}`).replace(/\r\n/g, '\n');
+    const sections = markdown.split(/^## (Goal|Planned work|Acceptance scenarios)[ \t]*$/m);
+    const [, goalHeading, goal, workHeading, work, acceptanceHeading, acceptance] = sections;
+    if (sections.length !== 7 || goalHeading !== 'Goal' || workHeading !== 'Planned work' ||
+        acceptanceHeading !== 'Acceptance scenarios' || !goal.trim() || !work.trim()) {
+      throw new Error('The spec needs nonempty Goal and Planned work sections followed by Acceptance scenarios.');
+    }
+    const [intro, ...scenarios] = acceptance.split(/^### Scenario:[ \t]*/m);
+    if (intro.trim()) throw new Error('Start each acceptance scenario with a `### Scenario: <name>` heading.');
+    names = scenarios.map((scenario) => {
+      const [name, ...body] = scenario.split('\n');
+      if (!body.some((line) => /^- When:[ \t]*\S/.test(line)) ||
+          !body.some((line) => /^- Then:[ \t]*\S/.test(line))) {
+        throw new Error(`Scenario "${name.trim()}" needs nonempty When and Then entries.`);
+      }
+      return name.trim();
+    });
+  } else {
+    // Drafts created by earlier factory versions keep their original specification layout.
+    const path = specification(state);
+    if (!['proposal.md', 'design.md', 'tasks.md'].every((file) => existsSync(join(draft, path, file)))) {
+      throw new Error('The existing draft is missing its proposal, design, or tasks.');
+    }
+    const files = entries(git(draft, 'ls-files', '-z', '--', `${path}/specs/`));
+    names = files.filter((file) => file.endsWith('/spec.md')).flatMap((file) =>
+      Array.from(git(draft, 'show', `:${file}`).matchAll(/^#### Scenario:[ \t]*([^\r\n]+)$/gm),
+        (match) => match[1].trim()),
+    );
+  }
+  if (!names.length || names.some((name) => !name) || new Set(names).size !== names.length) {
+    throw new Error('The spec must have at least one scenario and each scenario needs a unique name.');
   }
   return names;
 }
 
-function snapshot(draft, state) {
-  const changePath = `openspec/changes/${state.change}`;
-  const status = JSON.parse(openSpec(draft, 'status', '--change', state.change, '--json'));
-  if (!status.isComplete) throw new Error('Complete the OpenSpec proposal, specs, design, and tasks first.');
-  openSpec(draft, 'validate', state.change, '--type', 'change', '--strict', '--no-interactive');
+function recordDraft(draft, state) {
+  const changePath = specification(state);
+  if (state.specPath && !existsSync(join(draft, changePath))) {
+    throw new Error(`The draft specification is missing from ${changePath}.`);
+  }
   git(draft, 'add', '-A', '--', changePath);
   const changed = entries(git(draft, 'diff', '--cached', '--no-renames', '--name-only', '-z', state.base));
-  if (!changed.length || changed.some((file) => !file.startsWith(changePath + '/')) ||
-      git(draft, 'diff', '--name-only').trim() || git(draft, 'ls-files', '--others', '--exclude-standard').trim()) {
-    throw new Error(`The draft may change only files under ${changePath}.`);
+  const inSpec = (file) => state.specPath ? file === changePath : file.startsWith(changePath + '/');
+  const outsideSpec = git(draft, 'status', '--porcelain', '--untracked-files=all', '--', '.', `:(exclude)${changePath}`);
+  if (!changed.length || changed.some((file) => !inSpec(file)) || outsideSpec.trim()) {
+    throw new Error(`The draft may change only its specification at ${changePath}.`);
   }
-  state.scenarios = scenarioNames(draft, changePath);
+  state.scenarios = scenarioNames(draft, state);
   state.approvedRevision = null;
-  if (dirty(draft)) git(draft, 'commit', '-m', `Draft OpenSpec change: ${state.change}`);
+  if (dirty(draft)) git(draft, 'commit', '-m', `Draft specification: ${state.change}`);
   state.draftRevision = revision(draft);
   state.status = 'awaiting-approval';
 }
@@ -126,58 +144,67 @@ function readVerdict(path, expected) {
   return verdict;
 }
 
-function implementAndVerify(root, runPath, state, codex) {
-  const changePath = `openspec/changes/${state.change}`;
-  const implementation = join(runPath, 'implementation');
-  worktree(root, implementation, state.approvedRevision);
-  let feedback = '';
-  for (const attempt of [1, 2]) {
-    const previous = revision(implementation);
-    const implementationLog = join(runPath, `implementation-${attempt}.jsonl`);
-    const implementationOutput = join(runPath, `implementation-${attempt}.json`);
-    const result = { attempt, implementationLog, implementationOutput };
-    state.attempts.push(result);
-    saveState(runPath, state);
-    console.log(`Implementing attempt ${attempt} in ${implementation}`);
-    codex({
-      cwd: implementation,
-      log: implementationLog, output: implementationOutput, schema: implementationSchema,
-      prompt: `Implement the approved OpenSpec change at ${changePath} in this checkout.
-Read its proposal, specs, design, and tasks. Keep the change focused and run relevant checks.
-Leave all OpenSpec files as approved. Leave the changes in the worktree for the factory to commit.
+function implementCandidate(implementation, executionPath, runPath, state, result, codex, feedback) {
+  const spec = specification(state);
+  const { attempt } = result;
+  const previous = revision(implementation);
+  const implementationLog = join(executionPath, `implementation-${attempt}.jsonl`);
+  const implementationOutput = join(executionPath, `implementation-${attempt}.json`);
+  Object.assign(result, { implementationLog, implementationOutput });
+  saveState(runPath, state);
+  console.log(`Implementing attempt ${attempt} in ${implementation}`);
+  codex({
+    cwd: implementation,
+    log: implementationLog, output: implementationOutput, schema: implementationSchema,
+    prompt: `Implement the approved specification at ${spec} in this checkout.
+Read the requirements and acceptance scenarios. Keep the change focused and run relevant checks.
+Leave the approved specification untouched and leave the implementation in the worktree for the factory to commit.
 Report "ready" when the checkout is ready to verify. If a tool or environment failure prevents
 implementation, report "blocked" and describe the failure in the summary.
 Never push, merge, deploy, or run offensive security tasks.
 ${feedback}`,
-    });
-    const report = JSON.parse(readFileSync(implementationOutput, 'utf8'));
-    if (!['ready', 'blocked'].includes(report.status) || typeof report.summary !== 'string' || !report.summary.trim()) {
-      throw new Error('Implementer response does not contain a valid status and summary.');
-    }
-    result.implementationStatus = report.status;
-    if (report.status === 'blocked') {
-      result.status = 'blocked';
-      throw new Error(report.summary);
-    }
-    if (revision(implementation) !== previous ||
-        git(implementation, 'status', '--porcelain', '--untracked-files=all', '--', 'openspec').trim()) {
-      throw new Error('The implementer changed the Git revision or the approved OpenSpec files.');
-    }
-    if (dirty(implementation)) {
-      git(implementation, 'add', '-A');
-      git(implementation, 'commit', '-m', `Implement ${state.change} (attempt ${attempt})`);
-    }
-    const candidate = revision(implementation);
-    const verification = join(runPath, `verification-${attempt}`);
-    const log = join(runPath, `verification-${attempt}.jsonl`);
-    const output = join(runPath, `verdict-${attempt}.json`);
+  });
+  const report = JSON.parse(readFileSync(implementationOutput, 'utf8'));
+  if (!['ready', 'blocked'].includes(report.status) || typeof report.summary !== 'string' || !report.summary.trim()) {
+    throw new Error('Implementer response does not contain a valid status and summary.');
+  }
+  result.implementationStatus = report.status;
+  if (report.status === 'blocked') {
+    result.status = 'blocked';
+    throw new Error(report.summary);
+  }
+  if (revision(implementation) !== previous ||
+      git(implementation, 'status', '--porcelain', '--untracked-files=all', '--', spec).trim()) {
+    throw new Error('The implementer changed the Git revision or the approved specification.');
+  }
+  if (dirty(implementation)) {
+    git(implementation, 'add', '-A');
+    git(implementation, 'commit', '-m', `Implement ${state.change} (attempt ${attempt})`);
+  }
+  return revision(implementation);
+}
+
+function implementAndVerify(root, runPath, executionPath, state, codex, priorCandidate) {
+  const spec = specification(state);
+  const implementation = join(executionPath, 'implementation');
+  worktree(root, implementation, priorCandidate ?? state.approvedRevision);
+  let feedback = '';
+  for (const attempt of [1, 2]) {
+    const result = { attempt };
+    state.attempts.push(result);
+    const candidate = attempt === 1 && priorCandidate
+      ? priorCandidate
+      : implementCandidate(implementation, executionPath, runPath, state, result, codex, feedback);
+    const verification = join(executionPath, `verification-${attempt}`);
+    const log = join(executionPath, `verification-${attempt}.jsonl`);
+    const output = join(executionPath, `verdict-${attempt}.json`);
     Object.assign(result, { candidate, log, output });
     saveState(runPath, state);
     worktree(root, verification, candidate);
     console.log(`Verifying ${candidate} in ${verification}`);
     codex({
       cwd: verification, log, output, schema: verdictSchema,
-      prompt: `Independently verify candidate ${candidate} against the approved OpenSpec change at ${changePath}.
+      prompt: `Independently verify candidate ${candidate} against the approved specification at ${spec}.
 Exercise each approved scenario and give its exact heading as the name. Record actual commands,
 exit codes, and observations. A scenario that expects a command to fail can pass.
 Use status "defect" for an observed requirement failure, "blocked" for missing prerequisites
@@ -186,8 +213,8 @@ For "defect", include results for all scenarios. For "blocked", explain what you
 Keep the checkout's versioned files unchanged. Use temporary fixtures outside versioned paths.
 Stop any local test servers you start. Never push, deploy, or run offensive security tasks.`,
     });
-    if (revision(verification) !== candidate || dirty(verification)) {
-      throw new Error('The verifier modified its checkout. Its verdict cannot be used.');
+    if (revision(verification) !== candidate || git(verification, 'status', '--porcelain', '--untracked-files=no').trim()) {
+      throw new Error('The verifier changed its revision or tracked files. Its verdict cannot be used.');
     }
     const verdict = readVerdict(output, state.scenarios);
     result.status = verdict.status;
@@ -200,9 +227,9 @@ Stop any local test servers you start. Never push, deploy, or run offensive secu
 }
 
 const usage = `Usage:
-  factory.ps1 plan --change <kebab-case-id> --request <text>
-  factory.ps1 snapshot --run <id>
-  factory.ps1 approve --run <id> --revision <reviewed-commit>
+  factory.ps1 plan --change <kebab-case-id> --request <text> [--windows-sandbox mxc]
+  factory.ps1 approve --run <id> [--revision <reviewed-commit>] [--windows-sandbox mxc]
+  factory.ps1 retry --run <id> [--windows-sandbox mxc]
   factory.ps1 status --run <id>`;
 
 export function main(argv, { cwd = process.cwd(), codex = invokeCodex } = {}) {
@@ -212,20 +239,30 @@ export function main(argv, { cwd = process.cwd(), codex = invokeCodex } = {}) {
     return 0;
   }
   const options = {
-    plan: ['change', 'request'], snapshot: ['run'], approve: ['run', 'revision'], status: ['run'],
+    plan: ['change', 'request'], approve: ['run'], retry: ['run'], status: ['run'],
   };
   if (!Object.hasOwn(options, action)) throw new Error(usage);
+  const optionNames = [...options[action]];
+  if (['plan', 'approve', 'retry'].includes(action)) optionNames.push('windows-sandbox');
+  if (action === 'approve') optionNames.push('revision');
   const { values } = parseArgs({
     args,
-    options: Object.fromEntries(options[action].map((name) => [name, { type: 'string' }])),
+    options: Object.fromEntries(optionNames.map((name) => [name, { type: 'string' }])),
   });
   for (const name of options[action]) {
     if (!values[name]?.trim()) throw new Error(`Provide --${name}.\n${usage}`);
   }
-  if ((values.change && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(values.change)) ||
-      (values.run && !/^[a-f0-9-]{36}$/.test(values.run))) {
-    throw new Error('Use a kebab-case change ID and a run ID printed by the factory.');
+  if (values.change && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(values.change)) {
+    throw new Error('Use a kebab-case change ID.');
   }
+  if (values.run && !/^[a-f0-9-]{36}$/.test(values.run)) {
+    throw new Error('Use a run ID printed by the factory.');
+  }
+  const windowsSandbox = values['windows-sandbox'];
+  if (windowsSandbox !== undefined && windowsSandbox !== 'mxc') {
+    throw new Error('Use --windows-sandbox mxc to select MXC.');
+  }
+  const launch = (request) => codex({ ...request, windowsSandbox });
   const root = git(cwd, 'rev-parse', '--show-toplevel').trim();
   const runId = values.run ?? randomUUID();
   const runs = join(root, '.factory', 'runs');
@@ -236,9 +273,6 @@ export function main(argv, { cwd = process.cwd(), codex = invokeCodex } = {}) {
     console.log(readFileSync(stateFile, 'utf8').trim());
     return 0;
   }
-  if (action === 'plan' || action === 'snapshot') {
-    if (!existsSync(openSpecCli)) throw new Error('Install the repository-local OpenSpec CLI as shown in README.md.');
-  }
   if (action === 'plan') {
     mkdirSync(runs, { recursive: true });
     mkdirSync(runPath);
@@ -247,32 +281,24 @@ export function main(argv, { cwd = process.cwd(), codex = invokeCodex } = {}) {
   const lock = openSync(lockPath, 'wx');
   try {
     const state = action === 'plan'
-      ? { runId, change: values.change, base: revision(root), status: 'draft', attempts: [] }
+      ? { runId, change: values.change, specPath: `specs/${values.change}.md`,
+          base: revision(root), status: 'draft', attempts: [] }
       : JSON.parse(readFileSync(stateFile, 'utf8'));
     if (action === 'plan') {
       saveState(runPath, state);
-      console.log(`Run ${runId}. Draft checkout: ${draft}`);
+      console.log(`Run ${runId}. Draft specification: ${join(draft, state.specPath)}`);
       worktree(root, draft, state.base);
-      mkdirSync(join(draft, 'openspec', 'changes'), { recursive: true });
-      const config = join(draft, 'openspec', 'config.yaml');
-      const hadConfig = existsSync(config);
-      openSpec(draft, 'new', 'change', state.change, '--schema', 'spec-driven');
-      // OpenSpec may create a default config when starting from a pre-OpenSpec commit.
-      if (!hadConfig && existsSync(config)) unlinkSync(config);
-      const templates = JSON.parse(openSpec(draft, 'templates', '--schema', 'spec-driven', '--json'));
-      const artifactGuidance = ['proposal', 'specs', 'design', 'tasks'].map((artifact) =>
-        `${artifact}:\n${readFileSync(templates[artifact].path, 'utf8')}`,
-      ).join('\n\n');
+      if (existsSync(join(draft, state.specPath))) throw new Error('The spec already exists. Choose a new change ID.');
       const readme = join(draft, 'README.md');
       const output = join(runPath, 'plan.json');
-      codex({
+      launch({
         cwd: draft,
         log: join(runPath, 'planning.jsonl'),
         output, schema: planSchema, sandbox: 'read-only',
-        prompt: `Draft OpenSpec change ${state.change} for the developer request below.
-Return the proposal, design, tasks, and capability specifications as Markdown strings in the JSON schema.
-Use the local repository context and OpenSpec's spec-driven conventions. Use distinct scenario headings
-and observable acceptance criteria. Keep this phase read-only. Never push, deploy, or plan offensive security tasks.
+        prompt: `Draft a specification for ${state.change} based on the developer request below.
+Describe the goal and planned work, including design decisions and any prerequisites needed to verify the change.
+Return named acceptance scenarios with a single-line condition and a single-line observable expected result for each.
+Use distinct scenario names. Keep this phase read-only. Never push, deploy, or plan offensive security tasks.
 
 Tracked paths:
 ${git(draft, 'ls-files').slice(0, 10_000)}
@@ -280,29 +306,46 @@ ${git(draft, 'ls-files').slice(0, 10_000)}
 Repository README:
 ${existsSync(readme) ? readFileSync(readme, 'utf8').slice(0, 12_000) : '(none)'}
 
-OpenSpec artifact templates:
-${artifactGuidance}
-
 Developer request:
 ${values.request}`,
       });
-      writeDraft(draft, state.change, output);
-      snapshot(draft, state);
-    } else if (action === 'snapshot') {
-      if (!['draft', 'awaiting-approval'].includes(state.status)) {
-        throw new Error(`Run ${runId} cannot be revised in state ${state.status}.`);
-      }
-      snapshot(draft, state);
+      writeDraft(draft, state, output);
+      recordDraft(draft, state);
     } else {
-      if (state.status !== 'awaiting-approval' || values.revision !== state.draftRevision ||
-          revision(draft) !== state.draftRevision || dirty(draft)) {
-        throw new Error('Approval requires the latest clean draft revision. Review and snapshot any edits first.');
+      let executionPath = runPath;
+      let priorCandidate;
+      if (action === 'approve') {
+        if (!['draft', 'awaiting-approval'].includes(state.status)) {
+          throw new Error(`Run ${runId} cannot be approved in state ${state.status}.`);
+        }
+        if (revision(draft) !== (state.draftRevision ?? state.base)) {
+          throw new Error('The draft checkout moved to a different Git revision.');
+        }
+        if (values.revision === undefined) {
+          recordDraft(draft, state);
+        } else if (values.revision !== state.draftRevision || dirty(draft)) {
+          throw new Error('The draft does not match the specified revision. Review the draft before approving its current contents.');
+        }
+        state.approvedRevision = state.draftRevision;
+        console.log(`Approved specification revision: ${state.approvedRevision}`);
+      } else {
+        if (state.status !== 'blocked' || !state.approvedRevision ||
+            state.attempts.some((attempt) => attempt.status === 'defect')) {
+          throw new Error('Retry requires an approved run that was blocked before any verified defect.');
+        }
+        state.retries = (state.retries ?? 0) + 1;
+        executionPath = join(runPath, `retry-${state.retries}`);
+        mkdirSync(executionPath);
+        // Older runs could record the spec-only commit after a blocked implementation.
+        priorCandidate = state.attempts.findLast((attempt) =>
+          attempt.implementationStatus === 'ready' && attempt.candidate,
+        )?.candidate;
       }
-      state.approvedRevision = state.draftRevision;
+      delete state.error;
       state.status = 'running';
       saveState(runPath, state);
       try {
-        state.status = implementAndVerify(root, runPath, state, codex);
+        state.status = implementAndVerify(root, runPath, executionPath, state, launch, priorCandidate);
       } catch (error) {
         state.status = 'blocked';
         state.error = error.message;

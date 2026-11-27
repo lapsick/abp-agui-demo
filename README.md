@@ -56,34 +56,31 @@ on a different local port.
 
 ## Multi-agent Software Factory
 
-Install PowerShell 7, Git (with a commit identity), Node.js 22.20 or newer, and
-the Codex CLI. Sign in with `codex login`. Use the repository root to install
-the pinned OpenSpec CLI locally.
-
-```powershell
-npm.cmd install --prefix .factory/tools --ignore-scripts @fission-ai/openspec@2.2.0
-```
+Install PowerShell 7, Git (with a commit identity), Node.js 22 or newer, and
+the Codex CLI. Sign in with `codex login`.
 
 The factory starts from the current Git commit and keeps its worktrees under the
-ignored `.factory/runs` directory. This request was used for the mock stream pilot.
+ignored `.factory/runs` directory. Give it a request for the behavior you want.
 
 ```powershell
-.\factory.ps1 plan --change verify-mock-stream-completion --request "Add a CLI check of the mock AG-UI stream. Require matching RUN_STARTED and RUN_FINISHED events. A stream that ends after TEXT_MESSAGE_END must fail with a diagnostic naming RUN_FINISHED."
+.\factory.ps1 plan --change improve-mock-stream-diagnostics --request "When the mock stream check reports a missing RUN_FINISHED event, include the endpoint and requested run ID."
 ```
 
-Review the files in the printed draft worktree's
-`openspec/changes/verify-mock-stream-completion/` directory. Edit the draft
-there if needed, then run `.\factory.ps1 snapshot --run <run-id>` to validate
-and record the edits. Pass the revision you reviewed to the approval command.
+Review the printed `specs/<change-id>.md` file in the draft worktree. It contains the goal,
+planned work, and named acceptance scenarios. Each scenario has a `When`
+condition and a `Then` result. Edit it if needed, then approve the current
+contents using the run ID from `plan`.
 
 ```powershell
-.\factory.ps1 approve --run <run-id> --revision <draft-commit>
+.\factory.ps1 approve --run <run-id>
 .\factory.ps1 status --run <run-id>
 ```
 
-Approval starts the implementer. The factory commits the candidate in its
+Approval validates the draft, records its Git revision, and starts the
+implementer. For an unchanged draft, you can pass `--revision <draft-commit>`
+to approve that exact revision. The factory commits the candidate in its
 worktree and launches a fresh verifier in a separate checkout. The verifier
-records the command, exit code, and observed evidence for each OpenSpec
+records the command, exit code, and observed evidence for each acceptance
 scenario. A defect gives the implementer one repair attempt and starts a fresh
 verifier. To change the approved behavior, start a new run for the revised request.
 
@@ -93,8 +90,18 @@ Inspect the run's `run.json`, Codex logs, verdicts, and commits before using the
 candidate. The factory leaves the worktrees available for inspection. When
 finished, remove them with `git worktree remove <checkout-path>`.
 
+On compatible Windows hosts, pass `--windows-sandbox mxc` to select Codex's
+MXC sandbox for the factory's agents. If an approved run was blocked before
+any verified defect, retry it with its original approval. The factory keeps
+earlier logs and worktrees and uses an existing candidate commit if the
+implementer had already submitted one.
+
+```powershell
+.\factory.ps1 retry --run <run-id> --windows-sandbox mxc
+```
+
 Run `node --test factory/*.test.mjs` to exercise the workflow with controlled
-agent responses and the real OpenSpec CLI. To replay the stream cases against a
+agent responses. To replay the stream cases against a
 running mock server, use `node factory/mock-stream.test.mjs --url http://localhost:5080`.
 
 ## Limits / production migration
