@@ -4,6 +4,7 @@
 **/dist/
 **/.angular/
 .env
+/.factory/
 
 **/appsettings.Development.json
 **/appsettings.Local.json

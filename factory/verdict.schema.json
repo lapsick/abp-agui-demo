@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "scenarios"],
+  "properties": {
+    "status": { "type": "string", "enum": ["pass", "defect", "blocked"] },
+    "summary": { "type": "string" },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "outcome", "command", "exitCode", "observed"],
+        "properties": {
+          "name": { "type": "string" },
+          "outcome": { "type": "string", "enum": ["pass", "fail"] },
+          "command": { "type": "string" },
+          "exitCode": { "type": "integer" },
+          "observed": { "type": "string" }
+        }
+      }
+    }
+  }
+}

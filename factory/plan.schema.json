@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal", "design", "tasks", "specs"],
+  "properties": {
+    "proposal": { "type": "string" },
+    "design": { "type": "string" },
+    "tasks": { "type": "string" },
+    "specs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["capability", "markdown"],
+        "properties": {
+          "capability": { "type": "string" },
+          "markdown": { "type": "string" }
+        }
+      }
+    }
+  }
+}
