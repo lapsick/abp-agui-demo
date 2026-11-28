@@ -8,3 +8,8 @@
 
 **/appsettings.Development.json
 **/appsettings.Local.json
+
+/.agents/**
+!/.agents/skills/
+!/.agents/skills/speckit-*/
+!/.agents/skills/speckit-*/SKILL.md
